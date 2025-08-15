@@ -1,0 +1,70 @@
+# Arquivos e pastas do Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Ambientes virtuais
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Dependências locais
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+
+# Build e distribuição
+build/
+dist/
+*.egg
+*.manifest
+*.spec
+
+# Cache de ferramentas
+.pytest_cache/
+.ipynb_checkpoints
+.mypy_cache/
+.pyre/
+.pytype/
+
+# Configurações e arquivos temporários
+*.log
+*.tmp
+*.temp
+*.DS_Store
+Thumbs.db
+
+# Jupyter e dados temporários
+.ipynb_checkpoints
+*.nbconvert.ipynb
+
+# Arquivos do Streamlit
+.streamlit/secrets.toml
+.streamlit/config.toml
+
+# Dados sensíveis e arquivos de teste
+*.sqlite
+*.db
+*.csv
+*.tsv
+*.parquet
+*.xlsx
+*.json
+
+# Relatórios de cobertura
+htmlcov/
+.coverage
+.coverage.*
+.cache
+
+# IDEs
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
