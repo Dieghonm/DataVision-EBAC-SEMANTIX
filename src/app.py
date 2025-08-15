@@ -22,6 +22,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+
 class StreamlitMLApp:
     def __init__(self):
         self.logger = setup_logger('streamlit_app')
