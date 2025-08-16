@@ -1,0 +1,58 @@
+# configs/default_config.yaml
+project:
+  name: "ML Pipeline Demo"
+  version: "1.0.0"
+  description: "Pipeline configurável para classificação"
+
+data:
+  source: "iris"
+  test_size: 0.2
+  random_state: 42
+  shuffle: true
+
+preprocessing:
+  scaling:
+    method: "standard"
+  feature_selection:
+    enabled: false
+    method: "selectkbest"
+    k: 10
+  handle_missing:
+    strategy: "mean"
+
+model:
+  algorithm: "random_forest"
+  random_forest:
+    n_estimators: 100
+    max_depth: 10
+    min_samples_split: 2
+    random_state: 42
+
+training:
+  cross_validation:
+    enabled: true
+    cv_folds: 5
+  hyperparameter_tuning:
+    enabled: false
+    method: "grid_search"
+
+evaluation:
+  metrics:
+    - "accuracy"
+    - "precision" 
+    - "recall"
+    - "f1"
+  plots:
+    - "confusion_matrix"
+    - "roc_curve"
+    - "feature_importance"
+
+pipeline_steps:
+  - "load_data"
+  - "preprocess_data"
+  - "train_model"
+  - "evaluate_model"
+
+output:
+  save_model: true
+  results_dir: "data/results"
