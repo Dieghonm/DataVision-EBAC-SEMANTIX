@@ -1,4 +1,5 @@
 # src/app.py
+# src/app.py
 import streamlit as st
 import yaml
 import pandas as pd
@@ -9,6 +10,8 @@ from pathlib import Path
 import logging
 from datetime import datetime
 from sklearn.datasets import load_iris, load_wine, load_breast_cancer
+import joblib
+import json
 
 # Imports locais
 from src.pipeline.orchestrator import MLOrchestrator
@@ -29,6 +32,8 @@ class StreamlitMLApp:
         self.orchestrator = None
         self.results = {}
         self.current_data = None
+        self.models_dir = Path("data/models")
+        self.models_dir.mkdir(parents=True, exist_ok=True)
         
     def run(self):
         """Roda a aplicação Streamlit."""
@@ -41,13 +46,17 @@ class StreamlitMLApp:
         st.title("📈 DataVision EBAC SEMANTIX")
         st.markdown("---")
         
-        col1, col2, col3 = st.columns(3)
+        # Métricas do header
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("Status", "Pronto", delta=None)
         with col2:
-            st.metric("Modelos Disponíveis", "3", delta="+1")
+            st.metric("Modelos Disponíveis", "5", delta="+1")
         with col3:
             st.metric("Pipelines Executados", len(st.session_state.get('executions', [])))
+        with col4:
+            saved_models = list(self.models_dir.glob("*.pkl"))
+            st.metric("Modelos Salvos", len(saved_models))
     
     def _load_dataset(self, data_source, uploaded_file=None):
         """Carrega o dataset baseado na seleção do usuário."""
@@ -74,10 +83,9 @@ class StreamlitMLApp:
                 df['target'] = data.target
                 return df, "Breast Cancer Dataset"
                 
-            # Para datasets personalizados - CORRIGIDO para usar caminhos relativos seguros
+            # Para datasets personalizados
             elif data_source == "Credit":
                 try:
-                    # Tentar diferentes localizações do arquivo
                     possible_paths = [
                         "data/raw/credit_scoring.ftr",
                         "../data/raw/credit_scoring.ftr", 
@@ -146,7 +154,22 @@ class StreamlitMLApp:
         """Renderiza a barra lateral com configurações."""
         st.sidebar.title("⚙️ Configurações do Pipeline")
         
-        # Seção 1: Fonte dos dados
+        # Seletor de modo
+        mode = st.sidebar.radio(
+            "🎯 Modo de Operação:",
+            ["Treinar Novo Modelo", "Usar Modelo Salvo", "Fazer Predições"],
+            key="operation_mode"
+        )
+        
+        if mode == "Treinar Novo Modelo":
+            self._render_training_sidebar()
+        elif mode == "Usar Modelo Salvo":
+            self._render_model_loading_sidebar()
+        else:  # Fazer Predições
+            self._render_prediction_sidebar()
+    
+    def _render_training_sidebar(self):
+        """Renderiza sidebar para treinamento."""
         st.sidebar.subheader("📂 Dados")
         data_source = st.sidebar.selectbox(
             "Fonte de dados:",
@@ -174,10 +197,9 @@ class StreamlitMLApp:
             if self.current_data is not None:
                 st.rerun()
         
-        # Recuperar dados da sessão se existirem
         self.current_data = st.session_state.get('current_data')
         
-        # Seção 2: Configuração do modelo
+        # Configurações do modelo
         st.sidebar.subheader("🤖 Modelo")
         algorithm = st.sidebar.selectbox(
             "Algoritmo:",
@@ -185,10 +207,9 @@ class StreamlitMLApp:
             help="Escolha o algoritmo de ML"
         )
         
-        # Parâmetros específicos do algoritmo
         self._render_algorithm_params(algorithm)
         
-        # Seção 3: Configurações de avaliação
+        # Configurações de avaliação
         st.sidebar.subheader("📊 Avaliação")
         test_size = st.sidebar.slider("Tamanho do teste:", 0.1, 0.5, 0.2, 0.05)
         cv_folds = st.sidebar.slider("Cross-validation:", 3, 10, 5)
@@ -199,7 +220,19 @@ class StreamlitMLApp:
             default=["accuracy", "f1"]
         )
         
-        # Seção 4: Configuração de pipeline
+        # Opção para salvar modelo
+        st.sidebar.subheader("💾 Salvar Modelo")
+        save_model = st.sidebar.checkbox("Salvar modelo após treinamento", value=True)
+        
+        if save_model:
+            model_name = st.sidebar.text_input(
+                "Nome do modelo:",
+                value=f"{algorithm}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                help="Nome para salvar o modelo"
+            )
+            st.session_state.model_name_to_save = model_name
+        
+        # Configuração de pipeline
         st.sidebar.subheader("🔧 Pipeline")
         steps = st.sidebar.multiselect(
             "Etapas:",
@@ -207,20 +240,208 @@ class StreamlitMLApp:
             default=["load_data", "preprocess_data", "train_model", "evaluate_model"]
         )
         
-        # Botão para executar (só aparece se houver dados carregados)
+        if save_model and "save_results" not in steps:
+            steps.append("save_results")
+        
+        # Botão para executar
         if self.current_data is not None:
             if st.sidebar.button("🚀 Executar Pipeline", type="primary"):
                 self._execute_pipeline(
                     data_source, uploaded_file, algorithm, 
-                    test_size, cv_folds, metrics, steps
+                    test_size, cv_folds, metrics, steps, save_model
                 )
         else:
             st.sidebar.info("👆 Selecione um dataset para continuar")
+    
+    def _render_model_loading_sidebar(self):
+        """Renderiza sidebar para carregar modelo salvo."""
+        st.sidebar.subheader("📁 Modelos Salvos")
         
-        # Seção 5: Configurações avançadas
-        with st.sidebar.expander("⚙️ Configurações Avançadas"):
-            scaling = st.selectbox("Normalização:", ["standard", "minmax", "robust", "none"])
-            random_state = st.number_input("Random State:", value=42, min_value=0)
+        # Listar modelos disponíveis
+        saved_models = list(self.models_dir.glob("*.pkl"))
+        
+        if not saved_models:
+            st.sidebar.warning("Nenhum modelo salvo encontrado.")
+            return
+        
+        model_names = [f.stem for f in saved_models]
+        selected_model = st.sidebar.selectbox(
+            "Selecione o modelo:",
+            model_names,
+            help="Escolha um modelo salvo para carregar"
+        )
+        
+        if st.sidebar.button("🔄 Carregar Modelo", type="primary"):
+            self._load_saved_model(selected_model)
+        
+        # Mostrar informações do modelo se carregado
+        if hasattr(st.session_state, 'loaded_model_info'):
+            with st.sidebar.expander("ℹ️ Informações do Modelo"):
+                info = st.session_state.loaded_model_info
+                st.write(f"**Algoritmo:** {info.get('algorithm', 'N/A')}")
+                st.write(f"**Data:** {info.get('timestamp', 'N/A')}")
+                st.write(f"**Acurácia:** {info.get('accuracy', 'N/A'):.4f}")
+    
+    def _render_prediction_sidebar(self):
+        """Renderiza sidebar para fazer predições."""
+        st.sidebar.subheader("🔮 Predições")
+        
+        if not hasattr(st.session_state, 'loaded_model'):
+            st.sidebar.warning("⚠️ Carregue um modelo primeiro!")
+            st.sidebar.info("Use o modo 'Usar Modelo Salvo' para carregar um modelo.")
+            return
+        
+        # Opções de input
+        input_method = st.sidebar.radio(
+            "Método de entrada:",
+            ["Manual", "Upload CSV"],
+            help="Como você quer inserir os dados para predição"
+        )
+        
+        if input_method == "Manual":
+            self._render_manual_input()
+        else:
+            self._render_csv_upload_prediction()
+    
+    def _render_manual_input(self):
+        """Renderiza entrada manual de dados."""
+        st.sidebar.subheader("📝 Entrada Manual")
+        
+        if not hasattr(st.session_state, 'model_feature_names'):
+            st.sidebar.error("Informações das features não disponíveis.")
+            return
+        
+        feature_names = st.session_state.model_feature_names
+        feature_values = {}
+        
+        for feature in feature_names:
+            # Para simplificar, usar number_input para todas as features
+            feature_values[feature] = st.sidebar.number_input(
+                f"{feature}:",
+                value=0.0,
+                help=f"Valor para a feature {feature}"
+            )
+        
+        if st.sidebar.button("🎯 Fazer Predição", type="primary"):
+            self._make_single_prediction(feature_values)
+    
+    def _render_csv_upload_prediction(self):
+        """Renderiza upload de CSV para predições."""
+        st.sidebar.subheader("📄 Upload CSV")
+        
+        prediction_file = st.sidebar.file_uploader(
+            "Upload dados para predição:",
+            type=['csv'],
+            help="CSV com as mesmas features do modelo treinado"
+        )
+        
+        if prediction_file and st.sidebar.button("🎯 Fazer Predições", type="primary"):
+            self._make_batch_predictions(prediction_file)
+    
+    def _load_saved_model(self, model_name):
+        """Carrega um modelo salvo."""
+        try:
+            model_path = self.models_dir / f"{model_name}.pkl"
+            info_path = self.models_dir / f"{model_name}_info.json"
+            
+            # Carregar modelo
+            model = joblib.load(model_path)
+            st.session_state.loaded_model = model
+            
+            # Carregar informações se disponível
+            if info_path.exists():
+                with open(info_path, 'r') as f:
+                    info = json.load(f)
+                st.session_state.loaded_model_info = info
+                st.session_state.model_feature_names = info.get('feature_names', [])
+                st.session_state.model_scaler = info.get('scaler_path')
+            
+            st.success(f"✅ Modelo '{model_name}' carregado com sucesso!")
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"❌ Erro ao carregar modelo: {str(e)}")
+    
+    def _make_single_prediction(self, feature_values):
+        """Faz predição com entrada manual."""
+        try:
+            # Preparar dados
+            input_df = pd.DataFrame([feature_values])
+            
+            # Aplicar scaler se disponível
+            if hasattr(st.session_state, 'model_scaler') and st.session_state.model_scaler:
+                scaler_path = Path(st.session_state.model_scaler)
+                if scaler_path.exists():
+                    scaler = joblib.load(scaler_path)
+                    input_df = pd.DataFrame(
+                        scaler.transform(input_df),
+                        columns=input_df.columns
+                    )
+            
+            # Fazer predição
+            model = st.session_state.loaded_model
+            prediction = model.predict(input_df)[0]
+            
+            # Tentar obter probabilidades
+            if hasattr(model, 'predict_proba'):
+                probabilities = model.predict_proba(input_df)[0]
+                st.session_state.single_prediction = {
+                    'prediction': prediction,
+                    'probabilities': probabilities,
+                    'input_data': feature_values
+                }
+            else:
+                st.session_state.single_prediction = {
+                    'prediction': prediction,
+                    'input_data': feature_values
+                }
+            
+            st.success("✅ Predição realizada!")
+            
+        except Exception as e:
+            st.error(f"❌ Erro na predição: {str(e)}")
+    
+    def _make_batch_predictions(self, uploaded_file):
+        """Faz predições em lote com CSV."""
+        try:
+            # Carregar dados
+            input_df = pd.read_csv(uploaded_file)
+            
+            # Aplicar pré-processamento se necessário
+            processed_df = self._preprocess_data_for_ml(input_df)
+            
+            if processed_df is None:
+                st.error("❌ Erro no pré-processamento dos dados")
+                return
+            
+            # Remover coluna target se existir
+            if 'target' in processed_df.columns:
+                processed_df = processed_df.drop('target', axis=1)
+            
+            # Fazer predições
+            model = st.session_state.loaded_model
+            predictions = model.predict(processed_df)
+            
+            # Tentar obter probabilidades
+            if hasattr(model, 'predict_proba'):
+                probabilities = model.predict_proba(processed_df)
+                st.session_state.batch_predictions = {
+                    'predictions': predictions,
+                    'probabilities': probabilities,
+                    'input_data': input_df,
+                    'processed_data': processed_df
+                }
+            else:
+                st.session_state.batch_predictions = {
+                    'predictions': predictions,
+                    'input_data': input_df,
+                    'processed_data': processed_df
+                }
+            
+            st.success(f"✅ {len(predictions)} predições realizadas!")
+            
+        except Exception as e:
+            st.error(f"❌ Erro nas predições em lote: {str(e)}")
     
     def _render_algorithm_params(self, algorithm):
         """Renderiza parâmetros específicos do algoritmo."""
@@ -257,54 +478,43 @@ class StreamlitMLApp:
             
         df_processed = df.copy()
         
-        # 1. Converter colunas de datetime para features numéricas
+        # Converter colunas de datetime para features numéricas
         datetime_cols = df_processed.select_dtypes(include=['datetime64', 'datetime']).columns
         for col in datetime_cols:
-            # Extrair features de data
             df_processed[f'{col}_year'] = pd.to_datetime(df_processed[col]).dt.year
             df_processed[f'{col}_month'] = pd.to_datetime(df_processed[col]).dt.month
             df_processed[f'{col}_day'] = pd.to_datetime(df_processed[col]).dt.day
             df_processed[f'{col}_dayofweek'] = pd.to_datetime(df_processed[col]).dt.dayofweek
-            # Remover coluna original
             df_processed.drop(col, axis=1, inplace=True)
-            st.info(f"✅ Convertida coluna de data '{col}' em features numéricas")
         
-        # 2. Detectar e converter colunas que podem ser Timestamp como objeto
+        # Detectar e converter colunas que podem ser Timestamp como objeto
         for col in df_processed.columns:
             if df_processed[col].dtype == 'object':
-                # Tentar converter para datetime
                 try:
                     pd.to_datetime(df_processed[col])
-                    # Se conseguiu converter, é uma coluna de data
                     df_processed[f'{col}_year'] = pd.to_datetime(df_processed[col]).dt.year
                     df_processed[f'{col}_month'] = pd.to_datetime(df_processed[col]).dt.month
                     df_processed[f'{col}_day'] = pd.to_datetime(df_processed[col]).dt.day
                     df_processed[f'{col}_dayofweek'] = pd.to_datetime(df_processed[col]).dt.dayofweek
                     df_processed.drop(col, axis=1, inplace=True)
-                    st.info(f"✅ Detectada e convertida coluna de data '{col}' em features numéricas")
                 except:
-                    # Se não conseguiu, verificar se é categórica
-                    if df_processed[col].nunique() < 50:  # Assumir categórica se < 50 valores únicos
-                        # Encoding de variáveis categóricas
+                    if df_processed[col].nunique() < 50:
                         df_processed[col] = pd.Categorical(df_processed[col]).codes
-                        st.info(f"✅ Convertida variável categórica '{col}' para códigos numéricos")
         
-        # 3. Garantir que todas as colunas sejam numéricas (exceto target se existir)
+        # Garantir que todas as colunas sejam numéricas (exceto target se existir)
         non_numeric_cols = []
         for col in df_processed.columns:
             if col != 'target' and not pd.api.types.is_numeric_dtype(df_processed[col]):
                 non_numeric_cols.append(col)
         
         if non_numeric_cols:
-            st.warning(f"⚠️ Removendo colunas não numéricas: {non_numeric_cols}")
             df_processed.drop(non_numeric_cols, axis=1, inplace=True)
         
-        # 4. Tratar valores infinitos
+        # Tratar valores infinitos
         df_processed.replace([np.inf, -np.inf], np.nan, inplace=True)
         
-        # 5. Verificar se existe coluna target
+        # Verificar se existe coluna target
         if 'target' not in df_processed.columns:
-            # Tentar detectar coluna target baseado em nomes comuns
             target_candidates = [
                 'label', 'class', 'y', 'outcome', 'result', 'prediction',
                 'classification', 'category', 'grupo', 'classe'
@@ -320,16 +530,14 @@ class StreamlitMLApp:
             if target_col:
                 df_processed['target'] = df_processed[target_col]
                 df_processed.drop(target_col, axis=1, inplace=True)
-                st.info(f"✅ Coluna '{target_col}' definida como target")
             else:
-                # Se não encontrou, usar a última coluna
                 last_col = df_processed.columns[-1]
                 df_processed['target'] = df_processed[last_col]
                 df_processed.drop(last_col, axis=1, inplace=True)
-                st.warning(f"⚠️ Usando última coluna '{last_col}' como target")
         
         return df_processed
-    def _execute_pipeline(self, data_source, uploaded_file, algorithm, test_size, cv_folds, metrics, steps):
+    
+    def _execute_pipeline(self, data_source, uploaded_file, algorithm, test_size, cv_folds, metrics, steps, save_model):
         """Executa o pipeline com as configurações especificadas."""
         try:
             with st.spinner("🔄 Executando pipeline..."):
@@ -340,24 +548,20 @@ class StreamlitMLApp:
                 
                 # Determinar que dados usar e pré-processar
                 if data_source == "upload" and uploaded_file is not None:
-                    # Para upload, usar os dados carregados
                     pipeline_data = self._preprocess_data_for_ml(self.current_data)
                 elif data_source in ["Credit", "Hipertension", "Phone addiction"]:
-                    # Para datasets personalizados, usar os dados já carregados
                     pipeline_data = self._preprocess_data_for_ml(self.current_data)
-                    # Modificar config para usar dados externos
                     config['data']['source'] = 'external'
                 else:
-                    # Para datasets sklearn, deixar o orquestrador carregar
                     pipeline_data = None
-                
-                # Mostrar info sobre pré-processamento
-                if pipeline_data is not None:
-                    st.info(f"📊 Dados pré-processados: {pipeline_data.shape[0]} linhas, {pipeline_data.shape[1]} colunas")
                 
                 # Inicializar e executar orquestrador
                 self.orchestrator = MLOrchestrator(config_dict=config)
                 self.results = self.orchestrator.run_pipeline(pipeline_data)
+                
+                # Salvar modelo se solicitado
+                if save_model and self.results.get('status') == 'success':
+                    self._save_trained_model()
                 
                 # Salvar na sessão
                 if 'executions' not in st.session_state:
@@ -376,45 +580,53 @@ class StreamlitMLApp:
         except Exception as e:
             st.error(f"❌ Erro ao executar pipeline: {str(e)}")
             self.logger.error(f"Erro no pipeline: {str(e)}")
+    
+    def _save_trained_model(self):
+        """Salva o modelo treinado com informações adicionais."""
+        try:
+            model_name = st.session_state.get('model_name_to_save', f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
             
-            # Debug: mostrar mais detalhes do erro
-            with st.expander("🔍 Detalhes do Erro (Debug)"):
-                st.write(f"**Data Source:** {data_source}")
-                st.write(f"**Config:** {config}")
-                st.write(f"**Dados carregados:** {self.current_data is not None}")
-                if self.current_data is not None:
-                    st.write(f"**Shape dos dados originais:** {self.current_data.shape}")
-                    st.write(f"**Tipos de dados originais:**")
-                    st.write(self.current_data.dtypes)
-                    
-                    # Mostrar dados após pré-processamento
-                    try:
-                        processed_data = self._preprocess_data_for_ml(self.current_data)
-                        if processed_data is not None:
-                            st.write(f"**Shape após pré-processamento:** {processed_data.shape}")
-                            st.write(f"**Tipos após pré-processamento:**")
-                            st.write(processed_data.dtypes)
-                    except Exception as prep_error:
-                        st.write(f"**Erro no pré-processamento:** {prep_error}")
-                
-                st.write(f"**Erro completo:** {str(e)}")
-                
-                # Mostrar traceback se possível
-                import traceback
-                st.code(traceback.format_exc())
+            # Salvar modelo
+            model_path = self.models_dir / f"{model_name}.pkl"
+            joblib.dump(self.orchestrator.get_model(), model_path)
+            
+            # Salvar scaler se disponível
+            scaler = self.orchestrator.data_processor.get_scaler()
+            scaler_path = None
+            if scaler:
+                scaler_path = self.models_dir / f"{model_name}_scaler.pkl"
+                joblib.dump(scaler, scaler_path)
+            
+            # Salvar informações do modelo
+            model_info = {
+                'algorithm': self.orchestrator.config['model']['algorithm'],
+                'timestamp': datetime.now().isoformat(),
+                'feature_names': self.orchestrator.data_processor.get_feature_names(),
+                'accuracy': self.results['evaluation']['metrics'].get('accuracy', 0),
+                'f1_score': self.results['evaluation']['metrics'].get('f1', 0),
+                'scaler_path': str(scaler_path) if scaler_path else None,
+                'config': self.orchestrator.config
+            }
+            
+            info_path = self.models_dir / f"{model_name}_info.json"
+            with open(info_path, 'w') as f:
+                json.dump(model_info, f, indent=2, default=str)
+            
+            st.success(f"💾 Modelo salvo como '{model_name}'")
+            
+        except Exception as e:
+            st.error(f"❌ Erro ao salvar modelo: {str(e)}")
     
     def _create_config(self, data_source, algorithm, test_size, cv_folds, metrics, steps):
         """Cria configuração baseada nos inputs da interface."""
         model_params = st.session_state.get('model_params', {})
         
-        # Mapear nomes dos datasets personalizados para o orquestrador
         data_source_mapping = {
             'Credit': 'external',
             'Hipertension': 'external', 
             'Phone addiction': 'external'
         }
         
-        # Usar mapeamento se necessário
         config_data_source = data_source_mapping.get(data_source, data_source)
         
         config = {
@@ -445,19 +657,245 @@ class StreamlitMLApp:
                 'metrics': metrics,
                 'plots': ['confusion_matrix', 'roc_curve']
             },
-            'pipeline_steps': steps
+            'pipeline_steps': steps,
+            'output': {
+                'save_model': True,
+                'results_dir': str(self.models_dir)
+            }
         }
         
         return config
     
     def _render_main_content(self):
         """Renderiza o conteúdo principal."""
-        if hasattr(self, 'results') and self.results:
+        mode = st.session_state.get('operation_mode', 'Treinar Novo Modelo')
+        
+        if mode == "Fazer Predições":
+            self._render_predictions_results()
+        elif hasattr(self, 'results') and self.results:
             self._render_results()
         elif self.current_data is not None:
             self._render_data_preview()
         else:
             self._render_welcome()
+    
+    def _render_predictions_results(self):
+        """Renderiza resultados de predições."""
+        st.header("🔮 Resultados das Predições")
+        
+        # Predição única
+        if hasattr(st.session_state, 'single_prediction'):
+            pred = st.session_state.single_prediction
+            
+            st.subheader("🎯 Predição Individual")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.metric("Predição", f"Classe {pred['prediction']}")
+                
+                # Mostrar probabilidades se disponível
+                if 'probabilities' in pred:
+                    st.subheader("📊 Probabilidades por Classe")
+                    prob_df = pd.DataFrame({
+                        'Classe': range(len(pred['probabilities'])),
+                        'Probabilidade': pred['probabilities']
+                    })
+                    
+                    fig = px.bar(
+                        prob_df, 
+                        x='Classe', 
+                        y='Probabilidade',
+                        title="Probabilidades de Cada Classe"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                st.subheader("📝 Dados de Entrada")
+                input_df = pd.DataFrame([pred['input_data']])
+                st.dataframe(input_df.T, use_container_width=True)
+        
+        # Predições em lote
+        if hasattr(st.session_state, 'batch_predictions'):
+            pred_batch = st.session_state.batch_predictions
+            
+            st.subheader("📊 Predições em Lote")
+            
+            # Métricas gerais
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total de Predições", len(pred_batch['predictions']))
+            with col2:
+                unique_classes = len(np.unique(pred_batch['predictions']))
+                st.metric("Classes Preditas", unique_classes)
+            with col3:
+                most_common = np.bincount(pred_batch['predictions']).argmax()
+                st.metric("Classe Mais Frequente", most_common)
+            
+            # Tabela com resultados
+            st.subheader("📋 Resultados Detalhados")
+            results_df = pred_batch['input_data'].copy()
+            results_df['Predição'] = pred_batch['predictions']
+            
+            # Adicionar probabilidades se disponível
+            if 'probabilities' in pred_batch:
+                probs = pred_batch['probabilities']
+                for i in range(probs.shape[1]):
+                    results_df[f'Prob_Classe_{i}'] = probs[:, i]
+            
+            st.dataframe(results_df, use_container_width=True)
+            
+            # Gráfico de distribuição das predições
+            st.subheader("📈 Distribuição das Predições")
+            pred_counts = pd.Series(pred_batch['predictions']).value_counts().reset_index()
+            pred_counts.columns = ['Classe', 'Quantidade']
+            
+            fig = px.pie(
+                pred_counts, 
+                values='Quantidade', 
+                names='Classe',
+                title="Distribuição das Classes Preditas"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Opção para download
+            csv = results_df.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Resultados (CSV)",
+                data=csv,
+                file_name=f"predicoes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
+        
+        if not hasattr(st.session_state, 'single_prediction') and not hasattr(st.session_state, 'batch_predictions'):
+            st.info("👆 Use a barra lateral para fazer predições com um modelo carregado.")
+    
+    def _render_results(self):
+        """Renderiza os resultados do pipeline."""
+        st.header("📊 Resultados do Pipeline")
+        
+        # Status e métricas gerais no topo
+        self._render_pipeline_metrics()
+        
+        # Abas para diferentes seções
+        tab1, tab2, tab3, tab4 = st.tabs(["📈 Métricas", "📊 Visualizações", "🔧 Configuração", "📝 Logs"])
+        
+        with tab1:
+            self._render_metrics_tab()
+            
+        with tab2:
+            self._render_visualizations_tab()
+            
+        with tab3:
+            self._render_config_tab()
+            
+        with tab4:
+            self._render_logs_tab()
+    
+    def _render_pipeline_metrics(self):
+        """Renderiza métricas principais do pipeline de forma destacada."""
+        # Métricas de status
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            status = self.results.get('status', 'unknown')
+            if status == 'success':
+                st.success("✅ Sucesso")
+            else:
+                st.error("❌ Erro")
+            
+        with col2:
+            exec_time = self.results.get('execution_time', 0)
+            st.metric("⏱️ Tempo de Execução", f"{exec_time:.2f}s")
+            
+        with col3:
+            if 'data_shape' in self.results:
+                shape = self.results['data_shape']
+                st.metric("📊 Amostras", shape[0])
+                
+        with col4:
+            if 'data_shape' in self.results:
+                shape = self.results['data_shape']
+                st.metric("🔢 Features", shape[1])
+        
+        # Métricas de Performance - DESTACADAS
+        if 'evaluation' in self.results:
+            st.markdown("### 🎯 Performance do Modelo")
+            
+            metrics = self.results['evaluation']['metrics']
+            
+            # Métricas principais em destaque
+            metric_cols = st.columns(len([k for k, v in metrics.items() if isinstance(v, (int, float)) and k != 'roc_auc']))
+            
+            col_idx = 0
+            for metric, value in metrics.items():
+                if isinstance(value, (int, float)) and metric != 'roc_auc':  # Mostrar ROC-AUC separadamente se existir
+                    with metric_cols[col_idx]:
+                        # Definir cor baseada na performance
+                        if value >= 0.9:
+                            delta_color = "normal"
+                            delta = "Excelente"
+                        elif value >= 0.8:
+                            delta_color = "normal" 
+                            delta = "Bom"
+                        elif value >= 0.7:
+                            delta_color = "off"
+                            delta = "Regular"
+                        else:
+                            delta_color = "inverse"
+                            delta = "Precisa Melhorar"
+                        
+                        st.metric(
+                            label=metric.replace('_', ' ').title(), 
+                            value=f"{value:.4f}",
+                            delta=delta
+                        )
+                    col_idx += 1
+            
+            # ROC-AUC em destaque se disponível
+            if 'roc_auc' in metrics:
+                st.markdown("#### 📈 Área Sob a Curva ROC (AUC)")
+                roc_auc = metrics['roc_auc']
+                col1, col2, col3 = st.columns([1, 2, 1])
+                with col2:
+                    # Gauge chart para AUC
+                    fig = go.Figure(go.Indicator(
+                        mode = "gauge+number+delta",
+                        value = roc_auc,
+                        domain = {'x': [0, 1], 'y': [0, 1]},
+                        title = {'text': "ROC-AUC Score"},
+                        delta = {'reference': 0.5},
+                        gauge = {
+                            'axis': {'range': [None, 1]},
+                            'bar': {'color': "darkblue"},
+                            'steps': [
+                                {'range': [0, 0.5], 'color': "lightgray"},
+                                {'range': [0.5, 0.7], 'color': "yellow"},
+                                {'range': [0.7, 0.9], 'color': "orange"},
+                                {'range': [0.9, 1], 'color': "green"}
+                            ],
+                            'threshold': {
+                                'line': {'color': "red", 'width': 4},
+                                'thickness': 0.75,
+                                'value': 0.9
+                            }
+                        }
+                    ))
+                    fig.update_layout(height=300)
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            # Recomendações baseadas nas métricas
+            if hasattr(self, 'orchestrator') and self.orchestrator:
+                recommendations = self.orchestrator.evaluator._generate_recommendations(metrics)
+                if recommendations:
+                    st.markdown("### 💡 Recomendações")
+                    for rec in recommendations:
+                        if "✅" in rec:
+                            st.success(rec)
+                        elif "⚠️" in rec:
+                            st.warning(rec)
+                        else:
+                            st.info(rec)
     
     def _render_data_preview(self):
         """Renderiza a prévia dos dados carregados."""
@@ -481,7 +919,7 @@ class StreamlitMLApp:
         
         with tab1:
             st.subheader("Primeiras Linhas")
-            st.dataframe(self.current_data.head(10), use_container_width=True)
+            st.dataframe(self.current_data.head(5), use_container_width=True)
             
             st.subheader("Informações das Colunas")
             col_info = []
@@ -594,135 +1032,59 @@ class StreamlitMLApp:
         Esta aplicação permite que você configure e execute pipelines de Machine Learning 
         de forma visual e interativa.
         
-        ### Como usar:
-        1. **Selecione um dataset** na barra lateral
-        2. **Visualize os dados** antes do processamento
-        3. **Configure o algoritmo** e seus parâmetros
-        4. **Defina as métricas** de avaliação
-        5. **Execute o pipeline** e veja os resultados
+        ### 🆕 Novas Funcionalidades:
+        - **💾 Salvar Modelos**: Treine e salve seus modelos para reutilização
+        - **🔄 Carregar Modelos**: Carregue modelos salvos anteriormente  
+        - **🔮 Fazer Predições**: Use modelos treinados para predições em novos dados
+        - **📊 Métricas Destacadas**: Visualize a performance dos modelos de forma clara
         
-        **Comece selecionando um dataset na barra lateral!**
+        ### Como usar:
+        1. **Escolha o modo** na barra lateral: Treinar, Carregar ou Predizer
+        2. **Configure seu pipeline** ou carregue um modelo existente
+        3. **Visualize métricas** e resultados de forma interativa
+        4. **Faça predições** com novos dados usando modelos treinados
+        
+        **Comece selecionando um modo de operação na barra lateral!**
         """)
         
-        # Seção de Datasets Disponíveis
-        st.markdown("---")
-        st.subheader("Datasets Disponíveis")
-        st.markdown("Conheça os datasets que você pode usar nesta aplicação:")
-        
-        # Datasets Clássicos (Sklearn)
-        st.markdown("### Datasets Clássicos (Educacionais)")
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            if st.button("Iris Dataset", key="iris_info"):
-                st.info("""
-                **Iris Dataset**
-                - **Problema**: Classificação de espécies de flores íris
-                - **Classes**: 3 (Setosa, Versicolor, Virginica)  
-                - **Features**: 4 (comprimento/largura de pétalas e sépalas)
-                - **Amostras**: 150 (50 por classe)
-                - **Uso**: Perfeito para iniciantes - classificação multiclasse simples
-                - **Origem**: Ronald Fisher (1936)
-                """)
-        
-        with col2:
-            if st.button("Wine Dataset", key="wine_info"):
-                st.info("""
-                **Wine Dataset**
-                - **Problema**: Classificação de vinhos por origem
-                - **Classes**: 3 (diferentes cultivares)
-                - **Features**: 13 (análises químicas: álcool, ácido málico, etc.)
-                - **Amostras**: 178 vinhos
-                - **Uso**: Classificação com mais complexidade
-                - **Origem**: Vinhos da região de Piemonte, Itália
-                """)
-        
-        with col3:
-            if st.button("Breast Cancer", key="cancer_info"):
-                st.info("""
-                **Breast Cancer Dataset**
-                - **Problema**: Diagnóstico de câncer de mama
-                - **Classes**: 2 (Maligno, Benigno)
-                - **Features**: 30 (características dos núcleos celulares)
-                - **Amostras**: 569 casos
-                - **Uso**: Classificação binária - aplicação médica importante
-                - **Origem**: Hospital da Universidade de Wisconsin
-                """)
-        
-        # Datasets Personalizados
-        st.markdown("### Datasets Personalizados (Projetos Reais)")
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            if st.button("Credit Scoring", key="credit_info"):
-                st.info("""
-                **Credit Scoring Dataset**
-                - **Problema**: Análise de risco de crédito
-                - **Objetivo**: Prever se um cliente vai pagar o empréstimo
-                - **Tipo**: Classificação binária (Aprovado/Negado)
-                - **Aplicação**: Bancos e fintechs
-                - **Importância**: Decisões financeiras automatizadas
-                - **Desafios**: Balanceamento, interpretabilidade
-                """)
-        
-        with col2:
-            if st.button("Hypertension", key="hypertension_info"):
-                st.info("""
-                **Hypertension Dataset**
-                - **Problema**: Predição de hipertensão arterial
-                - **Objetivo**: Identificar pacientes com risco de hipertensão
-                - **Tipo**: Classificação médica
-                - **Aplicação**: Diagnóstico preventivo
-                - **Importância**: Saúde pública - prevenção de doenças cardiovasculares
-                - **Features**: Dados demográficos, estilo de vida, exames
-                """)
-        
-        with col3:
-            if st.button("Phone Addiction", key="phone_info"):
-                st.info("""
-                **Teen Phone Addiction Dataset**
-                - **Problema**: Identificação de vício em smartphones
-                - **Objetivo**: Detectar adolescentes com uso problemático do celular
-                - **Tipo**: Classificação comportamental
-                - **Aplicação**: Saúde mental, bem-estar digital
-                - **Importância**: Problema crescente na era digital
-                - **Features**: Padrões de uso, comportamento, dados psicológicos
-                """)
-        
-        # Recursos da aplicação
-        st.markdown("---")
-        st.markdown("### Recursos da Aplicação")
-        
-        feature_col1, feature_col2 = st.columns(2)
-        
-        with feature_col1:
-            st.markdown("""
-            **Análise de Dados:**
-            - Prévia interativa dos datasets
-            - Estatísticas descritivas automáticas
-            - Visualizações exploratórias
-            - Análise de qualidade dos dados
-            - Detecção de valores faltantes
-            - Análise de correlações
-            """)
-        
-        with feature_col2:
-            st.markdown("""
-            **Machine Learning:**
-            - Múltiplos algoritmos (RF, SVM, LogReg)
-            - Configuração de hiperparâmetros
-            - Cross-validation automática
-            - Métricas de avaliação completas
-            - Visualizações de resultados
-            - Histórico de experimentos
-            """)
+        # Seção de Modelos Salvos
+        saved_models = list(self.models_dir.glob("*.pkl"))
+        if saved_models:
+            st.markdown("---")
+            st.subheader("💾 Modelos Salvos Disponíveis")
+            
+            models_data = []
+            for model_file in saved_models:
+                info_file = model_file.parent / f"{model_file.stem}_info.json"
+                if info_file.exists():
+                    try:
+                        with open(info_file, 'r') as f:
+                            info = json.load(f)
+                        models_data.append({
+                            'Nome': model_file.stem,
+                            'Algoritmo': info.get('algorithm', 'N/A'),
+                            'Acurácia': f"{info.get('accuracy', 0):.4f}",
+                            'F1-Score': f"{info.get('f1_score', 0):.4f}",
+                            'Data': info.get('timestamp', 'N/A')[:10] if info.get('timestamp') else 'N/A'
+                        })
+                    except:
+                        models_data.append({
+                            'Nome': model_file.stem,
+                            'Algoritmo': 'N/A',
+                            'Acurácia': 'N/A',
+                            'F1-Score': 'N/A',
+                            'Data': 'N/A'
+                        })
+            
+            if models_data:
+                st.dataframe(pd.DataFrame(models_data), use_container_width=True)
         
         # Histórico de execuções
         if 'executions' in st.session_state and st.session_state.executions:
             st.markdown("---")
-            st.subheader("Histórico de Execuções")
+            st.subheader("📜 Histórico Recente")
             
-            for i, execution in enumerate(reversed(st.session_state.executions[-5:])):
+            for i, execution in enumerate(reversed(st.session_state.executions[-3:])):
                 with st.expander(f"Execução {len(st.session_state.executions) - i} - {execution['timestamp'].strftime('%H:%M:%S')}"):
                     col1, col2 = st.columns(2)
                     with col1:
@@ -735,62 +1097,12 @@ class StreamlitMLApp:
                                 if isinstance(value, (int, float)):
                                     st.metric(metric.title(), f"{value:.4f}")
     
-    def _render_results(self):
-        """Renderiza os resultados do pipeline."""
-        st.header("📊 Resultados do Pipeline")
-        
-        # Status e métricas gerais
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            status = self.results.get('status', 'unknown')
-            st.metric("Status", status.title(), delta=None)
-            
-        with col2:
-            exec_time = self.results.get('execution_time', 0)
-            st.metric("Tempo (s)", f"{exec_time:.2f}")
-            
-        with col3:
-            if 'data_shape' in self.results:
-                shape = self.results['data_shape']
-                st.metric("Amostras", shape[0])
-                
-        with col4:
-            if 'data_shape' in self.results:
-                shape = self.results['data_shape']
-                st.metric("Features", shape[1])
-        
-        # Abas para diferentes seções
-        tab1, tab2, tab3, tab4 = st.tabs(["📈 Métricas", "📊 Visualizações", "🔧 Configuração", "📝 Logs"])
-        
-        with tab1:
-            self._render_metrics_tab()
-            
-        with tab2:
-            self._render_visualizations_tab()
-            
-        with tab3:
-            self._render_config_tab()
-            
-        with tab4:
-            self._render_logs_tab()
-    
     def _render_metrics_tab(self):
         """Renderiza a aba de métricas."""
         if 'evaluation' in self.results:
             metrics = self.results['evaluation']['metrics']
             
-            st.subheader("🎯 Métricas de Performance")
-            
-            # Métricas principais em colunas
-            cols = st.columns(len([k for k, v in metrics.items() if isinstance(v, (int, float))]))
-            
-            col_idx = 0
-            for metric, value in metrics.items():
-                if isinstance(value, (int, float)):
-                    with cols[col_idx]:
-                        st.metric(metric.replace('_', ' ').title(), f"{value:.4f}")
-                    col_idx += 1
+            st.subheader("🎯 Métricas de Performance Detalhadas")
             
             # Matriz de confusão se disponível
             if 'confusion_matrix' in metrics:
@@ -804,6 +1116,31 @@ class StreamlitMLApp:
                     title="Matriz de Confusão"
                 )
                 st.plotly_chart(fig, use_container_width=True)
+            
+            # Relatório de classificação
+            if 'classification_report' in metrics:
+                st.subheader("📋 Relatório de Classificação")
+                report = metrics['classification_report']
+                
+                # Converter para DataFrame para melhor visualização
+                report_df = pd.DataFrame(report).transpose()
+                
+                # Remover linhas que não são classes
+                classes_df = report_df[~report_df.index.isin(['accuracy', 'macro avg', 'weighted avg'])]
+                if not classes_df.empty:
+                    st.dataframe(classes_df, use_container_width=True)
+                
+                # Mostrar médias
+                if 'weighted avg' in report:
+                    st.subheader("📊 Médias Ponderadas")
+                    weighted_avg = report['weighted avg']
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Precision", f"{weighted_avg['precision']:.4f}")
+                    with col2:
+                        st.metric("Recall", f"{weighted_avg['recall']:.4f}")
+                    with col3:
+                        st.metric("F1-Score", f"{weighted_avg['f1-score']:.4f}")
     
     def _render_visualizations_tab(self):
         """Renderiza a aba de visualizações."""
@@ -819,22 +1156,70 @@ class StreamlitMLApp:
         """Renderiza a aba de configuração."""
         if hasattr(self, 'orchestrator') and self.orchestrator:
             st.subheader("⚙️ Configuração Utilizada")
-            st.json(self.orchestrator.config)
+            
+            # Mostrar configuração de forma mais organizada
+            config = self.orchestrator.config
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**Projeto:**")
+                st.json(config.get('project', {}))
+                
+                st.markdown("**Dados:**")
+                st.json(config.get('data', {}))
+                
+                st.markdown("**Modelo:**")
+                st.json(config.get('model', {}))
+            
+            with col2:
+                st.markdown("**Pré-processamento:**")
+                st.json(config.get('preprocessing', {}))
+                
+                st.markdown("**Treinamento:**")
+                st.json(config.get('training', {}))
+                
+                st.markdown("**Avaliação:**")
+                st.json(config.get('evaluation', {}))
+            
+            # Opção para download da configuração
+            config_yaml = yaml.dump(config, default_flow_style=False)
+            st.download_button(
+                label="📥 Download Configuração (YAML)",
+                data=config_yaml,
+                file_name=f"config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.yaml",
+                mime="text/yaml"
+            )
     
     def _render_logs_tab(self):
         """Renderiza a aba de logs."""
         st.subheader("📝 Logs de Execução")
         
-        # Aqui você pode mostrar logs do arquivo ou do logger
-        st.info("Logs detalhados estão disponíveis no arquivo logs/app.log")
-        
+        # Mostrar logs do resultado se disponível
         if hasattr(self, 'results') and 'status' in self.results:
             st.text(f"Status final: {self.results['status']}")
             
             if 'error' in self.results:
                 st.error(f"Erro: {self.results['error']}")
+            
+            # Informações de execução
+            if 'execution_time' in self.results:
+                st.info(f"⏱️ Tempo de execução: {self.results['execution_time']:.2f} segundos")
+            
+            # Informações dos dados
+            if 'data_shape' in self.results:
+                shape = self.results['data_shape']
+                st.info(f"📊 Dataset processado: {shape[0]} linhas × {shape[1]} colunas")
+        
+        # Link para logs detalhados
+        log_files = list(Path("logs").glob("*.log")) if Path("logs").exists() else []
+        if log_files:
+            st.info(f"📁 Logs detalhados disponíveis em: {log_files[-1]}")
+
 
 # Executar aplicação
 if __name__ == "__main__":
     app = StreamlitMLApp()
     app.run()
+        
+        #

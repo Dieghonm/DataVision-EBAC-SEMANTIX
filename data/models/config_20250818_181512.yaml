@@ -1,0 +1,37 @@
+data:
+  random_state: 42
+  source: wine
+  test_size: 0.2
+evaluation:
+  metrics:
+  - accuracy
+  - f1
+  plots:
+  - confusion_matrix
+  - roc_curve
+model:
+  algorithm: random_forest
+  random_forest:
+    max_depth: 10
+    n_estimators: 100
+output:
+  results_dir: data/models
+  save_model: true
+pipeline_steps:
+- load_data
+- preprocess_data
+- train_model
+- evaluate_model
+- save_results
+preprocessing:
+  handle_missing:
+    strategy: mean
+  scaling:
+    method: standard
+project:
+  name: Pipeline random_forest - wine
+  version: 1.0.0
+training:
+  cross_validation:
+    cv_folds: 5
+    enabled: true

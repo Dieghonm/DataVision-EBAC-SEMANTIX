@@ -211,7 +211,8 @@ class MLOrchestrator:
         # Log das métricas principais
         for metric, value in metrics.items():
             if isinstance(value, (int, float)):
-                self.logger.info(f"📊 {metric}: {value:.4f}")
+                self.logger.info(f"📊 {metric}: {value:.4f} teste")
+        self.logger.info(f"Métricas da avaliação: {self.results['evaluation']['metrics']}")
     
     def _save_results(self):
         """Salva resultados se configurado."""
